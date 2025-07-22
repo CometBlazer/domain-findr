@@ -280,7 +280,7 @@ class NameComProvider(BaseDomainProvider):
     def __init__(self):
         super().__init__("name.com")
     
-    async def check_domains(self, domains: List[str], tld_preference: str) -> List[DomainResult]:
+    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
         """Check domain availability using Name.com API"""
         results = []
         
