@@ -71,6 +71,8 @@ class DomainPreference(str, Enum):
     NET = ".net"
     ORG = ".org"
     IO = ".io"
+    SO = ".so"
+    CO = ".co"
     ANY = "any"
 
 class DomainRequest(BaseModel):

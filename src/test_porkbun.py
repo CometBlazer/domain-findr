@@ -18,7 +18,7 @@ async def test_porkbun_detailed():
         try:
             print("\n🧪 Test 1: Basic API Ping...")
             response = await client.post(
-                "https://porkbun.com/api/json/v3/ping",
+                "https://api.porkbun.com/api/json/v3/ping",
                 json={
                     "apikey": PORKBUN_API_KEY,
                     "secretapikey": PORKBUN_SECRET_KEY
@@ -39,7 +39,7 @@ async def test_porkbun_detailed():
         try:
             print("\n🧪 Test 2: Pricing Endpoint...")
             response = await client.post(
-                "https://porkbun.com/api/json/v3/pricing/get",
+                "https://api.porkbun.com/api/json/v3/pricing/get",
                 json={
                     "apikey": PORKBUN_API_KEY,
                     "secretapikey": PORKBUN_SECRET_KEY
@@ -59,7 +59,7 @@ async def test_porkbun_detailed():
     async with httpx.AsyncClient() as client:
         try:
             print("\n🧪 Test 3: Correct Domain Check Endpoint...")
-            test_domain = "example-test-domain-12345.com"
+            test_domain = "haloway.co"
             response = await client.post(
                 f"https://api.porkbun.com/api/json/v3/domain/checkDomain/{test_domain}",
                 json={
@@ -82,7 +82,7 @@ async def test_porkbun_detailed():
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                "https://porkbun.com/api/json/v3/ping",
+                "https://api.porkbun.com/api/json/v3/ping",
                 json={
                     "apikey": PORKBUN_API_KEY,
                     "secretapikey": PORKBUN_SECRET_KEY
