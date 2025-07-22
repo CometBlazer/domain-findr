@@ -10,6 +10,10 @@ from datetime import datetime
 import asyncio
 from enum import Enum
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -27,12 +31,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment variables
+# Environment variables (now loaded from .env file)
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this")
 PORKBUN_API_KEY = os.getenv("PORKBUN_API_KEY", "")
 PORKBUN_SECRET_KEY = os.getenv("PORKBUN_SECRET_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Changed from OpenAI to Gemini
+
+print(f"Loaded Porkbun API Key: {'✅ Yes' if PORKBUN_API_KEY else '❌ No'}")
+print(f"Loaded Porkbun Secret: {'✅ Yes' if PORKBUN_SECRET_KEY else '❌ No'}")
 
 # Redis client
 try:
@@ -152,7 +159,7 @@ class DomainSuggestionAgent:
         
         for domain_name in domains:
             # Add TLD if not present
-            if not any(domain_name.endswith(tld) for tld in ['.com', '.co', '.org', '.io']):
+            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io']):
                 domain_name = f"{domain_name}.com"
             
             try:
