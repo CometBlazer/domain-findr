@@ -36,7 +36,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this")
 PORKBUN_API_KEY = os.getenv("PORKBUN_API_KEY", "")
 PORKBUN_SECRET_KEY = os.getenv("PORKBUN_SECRET_KEY", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Changed from OpenAI to Gemini
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 print(f"Loaded Porkbun API Key: {'✅ Yes' if PORKBUN_API_KEY else '❌ No'}")
 print(f"Loaded Porkbun Secret: {'✅ Yes' if PORKBUN_SECRET_KEY else '❌ No'}")
@@ -186,55 +186,67 @@ class DomainSuggestionAgent:
                     except Exception as e:
                         print(f"Redis read error: {e}")
                 
-                # Query Porkbun API
+                # Query Porkbun API - FIXED: Using correct endpoint and payload
                 async with httpx.AsyncClient() as client:
-                    # First check if domain is available
+                    # Check domain availability using the correct endpoint
                     availability_response = await client.post(
-                        "https://porkbun.com/api/json/v3/domain/isAvailable",
+                        f"https://api.porkbun.com/api/json/v3/domain/checkDomain/{domain_name}",
                         json={
-                            "apikey": PORKBUN_API_KEY,
                             "secretapikey": PORKBUN_SECRET_KEY,
-                            "domain": domain_name
-                        }
+                            "apikey": PORKBUN_API_KEY
+                        },
+                        timeout=30.0
                     )
                     
-                    availability_data = availability_response.json()
-                    is_available = availability_data.get("status") == "SUCCESS"
-                    
-                    price_first_year = None
-                    price_annual = None
-                    pricing_details = None
-                    
-                    if is_available:
-                        # Get pricing information
-                        pricing_response = await client.post(
-                            "https://porkbun.com/api/json/v3/pricing/get",
-                            json={
-                                "apikey": PORKBUN_API_KEY,
-                                "secretapikey": PORKBUN_SECRET_KEY
-                            }
+                    if availability_response.status_code == 200:
+                        availability_data = availability_response.json()
+                        
+                        # Parse the response correctly according to Porkbun docs
+                        is_available = (
+                            availability_data.get("status") == "SUCCESS" and 
+                            availability_data.get("response", {}).get("avail") == "yes"
                         )
                         
-                        if pricing_response.status_code == 200:
-                            pricing_data = pricing_response.json()
-                            tld = domain_name.split('.')[-1]
+                        price_first_year = None
+                        price_annual = None
+                        pricing_details = None
+                        deal_info = None
+                        
+                        if is_available and availability_data.get("response"):
+                            response_data = availability_data["response"]
                             
-                            if pricing_data.get("status") == "SUCCESS" and tld in pricing_data.get("pricing", {}):
-                                tld_pricing = pricing_data["pricing"][tld]
-                                price_first_year = float(tld_pricing.get("registration", 0))
-                                price_annual = float(tld_pricing.get("renewal", 0))
+                            # Get pricing from the domain check response
+                            price_first_year = float(response_data.get("price", 0))
+                            price_annual = float(response_data.get("regularPrice", 0))
+                            
+                            # Check for additional pricing details
+                            additional = response_data.get("additional", {})
+                            if additional:
+                                renewal_price = additional.get("renewal", {}).get("price")
+                                transfer_price = additional.get("transfer", {}).get("price")
                                 
-                                # Check for special pricing
                                 pricing_details = {
                                     "registration": price_first_year,
-                                    "renewal": price_annual,
-                                    "transfer": float(tld_pricing.get("transfer", 0))
+                                    "renewal": float(renewal_price) if renewal_price else price_annual,
+                                    "transfer": float(transfer_price) if transfer_price else price_annual,
+                                    "premium": response_data.get("premium") == "yes",
+                                    "first_year_promo": response_data.get("firstYearPromo") == "yes"
                                 }
                                 
-                                # Format deal information
-                                deal_info = None
-                                if price_first_year != price_annual:
-                                    deal_info = f"First year: ${price_first_year}, Then: ${price_annual}/year"
+                                # Set annual price to renewal price if different
+                                if renewal_price:
+                                    price_annual = float(renewal_price)
+                            
+                            # Format deal information
+                            if price_first_year != price_annual and price_annual > 0:
+                                deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
+                            elif response_data.get("firstYearPromo") == "yes":
+                                deal_info = f"Promotional pricing: ${price_first_year:.2f} first year"
+                    
+                    else:
+                        # If API call failed, mark as unavailable
+                        is_available = False
+                        print(f"API call failed for {domain_name}: {availability_response.status_code}")
                     
                     result = DomainResult(
                         domain=domain_name,
@@ -321,6 +333,41 @@ class DomainSuggestionAgent:
 
 # Initialize AI agent
 domain_agent = DomainSuggestionAgent()
+
+# Test Porkbun API connection
+@app.get("/api/test-porkbun")
+async def test_porkbun_connection():
+    """Test Porkbun API connection"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.porkbun.com/api/json/v3/ping",
+                json={
+                    "secretapikey": PORKBUN_SECRET_KEY,
+                    "apikey": PORKBUN_API_KEY
+                },
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "status": "success",
+                    "porkbun_response": data,
+                    "message": "Porkbun API connection successful"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Porkbun API returned status {response.status_code}",
+                    "response": response.text
+                }
+                
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to connect to Porkbun API: {str(e)}"
+        }
 
 # API Routes
 @app.post("/api/domains/suggest", response_model=DomainResponse)
