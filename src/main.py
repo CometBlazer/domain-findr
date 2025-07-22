@@ -107,7 +107,7 @@ class BaseDomainProvider:
     def __init__(self, name: str):
         self.name = name
     
-    async def check_domains(self, domains: List[str], tld_preference: str) -> List[DomainResult]:
+    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
         raise NotImplementedError
     
     def calculate_domain_score(self, domain: str, is_available: bool, price: Optional[float] = None) -> float:
@@ -161,7 +161,7 @@ class PorkbunProvider(BaseDomainProvider):
     def __init__(self):
         super().__init__("porkbun")
     
-    async def check_domains(self, domains: List[str], tld_preference: str) -> List[DomainResult]:
+    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
         """Check domain availability using Porkbun API with rate limiting"""
         results = []
         
@@ -223,6 +223,10 @@ class PorkbunProvider(BaseDomainProvider):
                         response_data = availability_data["response"]
                         price_first_year = float(response_data.get("price", 0))
                         price_annual = float(response_data.get("regularPrice", 0))
+                        
+                        # Filter by max_price - check both first year and annual price
+                        if price_first_year > max_price or price_annual > max_price:
+                            continue  # Skip domains that exceed the budget
                         
                         additional = response_data.get("additional", {})
                         if additional:
@@ -320,11 +324,13 @@ class NameComProvider(BaseDomainProvider):
                     return results
                 
                 availability_data = availability_response.json()
+                print(f"Name.com API Response: {availability_data}")  # Debug line
                 
                 # Process results
                 for domain_info in availability_data.get("results", []):
                     domain_name = domain_info.get("domainName", "")
                     is_available = domain_info.get("purchasable", False)
+                    purchase_type = domain_info.get("purchaseType", "")
                     
                     price_first_year = None
                     price_annual = None
@@ -332,17 +338,28 @@ class NameComProvider(BaseDomainProvider):
                     deal_info = None
                     
                     if is_available:
-                        price_first_year = domain_info.get("purchasePrice", 0) / 100  # Convert from cents
-                        price_annual = domain_info.get("renewalPrice", 0) / 100      # Convert from cents
+                        # Name.com API returns prices in dollars
+                        price_first_year = float(domain_info.get("purchasePrice", 0))
+                        price_annual = float(domain_info.get("renewalPrice", 0))
+                        
+                        # Filter by max_price - check both first year and annual price
+                        if price_first_year > max_price or price_annual > max_price:
+                            continue  # Skip domains that exceed the budget
                         
                         pricing_details = {
                             "registration": price_first_year,
                             "renewal": price_annual,
-                            "premium": domain_info.get("premium", False)
+                            "premium": domain_info.get("premium", False),
+                            "purchase_type": purchase_type
                         }
                         
                         if price_first_year != price_annual and price_annual > 0:
                             deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
+                        
+                        # Add premium indicator to deal_info if it's a premium domain
+                        if domain_info.get("premium", False) or purchase_type in ["aftermarket_s", "aftermarket"]:
+                            premium_info = f"Premium domain ({purchase_type})"
+                            deal_info = f"{deal_info} - {premium_info}" if deal_info else premium_info
                     
                     result = DomainResult(
                         domain=domain_name,
@@ -433,14 +450,14 @@ class DomainSuggestionAgent:
     async def search_domains_parallel(self, domains: List[str], request: DomainRequest) -> DomainResponse:
         """Search domains across multiple providers in parallel"""
         
-        # Run both providers in parallel
+        # Run both providers in parallel with max_price filtering
         tasks = []
         
         if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
-            tasks.append(self.porkbun.check_domains(domains, request.domain_preference))
+            tasks.append(self.porkbun.check_domains(domains, request.domain_preference, request.max_price))
         
         if NAMECOM_API_TOKEN and NAMECOM_USERNAME:
-            tasks.append(self.namecom.check_domains(domains, request.domain_preference))
+            tasks.append(self.namecom.check_domains(domains, request.domain_preference, request.max_price))
         
         if not tasks:
             raise HTTPException(status_code=500, detail="No domain providers configured")
