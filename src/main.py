@@ -13,6 +13,7 @@ import logging
 from dotenv import load_dotenv
 import base64
 import re
+import uuid # <-- Added this import
 
 # Load environment variables from .env file
 load_dotenv()
@@ -691,40 +692,37 @@ class DomainSuggestionAgent:
         
         return min(score, 10.0)
 
+    # --- THIS IS THE FULLY CORRECTED METHOD ---
     async def search_domains_parallel(self, request: DomainRequest) -> DomainResponse:
         """Search domains using selected providers with new input support"""
-        
-        # Parse input to get domains to check
+
         direct_domains, actual_input_type = InputParser.parse_input(request)
-        
+
         all_domains_to_check = []
         search_summary = {
             "input_type": actual_input_type.value,
             "original_input": request.input_text,
             "providers_used": [],
             "provider_selection": request.provider_preference.value,
-            "domains_actually_checked": 0,
+            "domains_generated_for_check": 0,
+            "domains_actually_checked_by_providers": 0,
             "available_domains_found": 0,
             "errors": [],
             "generation_method": {}
         }
-        
+
         if actual_input_type == InputType.IDEA:
-            # Generate AI suggestions
             base_names = await self.generate_domain_ideas(request)
             top_domains, all_combinations = self.generate_domain_combinations(base_names, request)
             all_domains_to_check = top_domains
-            
             search_summary["generation_method"] = {
                 "type": "ai_generated",
                 "base_names_generated": len(base_names),
                 "total_combinations": len(all_combinations),
-                "top_selected": len(top_domains)
+                "top_selected_for_check": len(top_domains)
             }
             input_source = "ai_generated"
-            
         elif actual_input_type == InputType.BASE_NAME:
-            # Base name expansion
             all_domains_to_check = direct_domains
             search_summary["generation_method"] = {
                 "type": "base_expansion",
@@ -732,32 +730,27 @@ class DomainSuggestionAgent:
                 "domains_generated": len(direct_domains)
             }
             input_source = "base_expansion"
-            
         else:  # InputType.EXACT_NAME
-            # Exact domain checking
             all_domains_to_check = direct_domains
             search_summary["generation_method"] = {
                 "type": "user_provided",
                 "exact_domains": direct_domains
             }
             input_source = "user_provided"
-        
-        # Build provider tasks
+
+        search_summary["domains_generated_for_check"] = len(all_domains_to_check)
+
         tasks = []
         providers_to_use = []
-        
-        # Porkbun
-        if (request.provider_preference in [ProviderPreference.PORKBUN, ProviderPreference.ANY] and 
+        if (request.provider_preference in [ProviderPreference.PORKBUN, ProviderPreference.ANY] and
             PORKBUN_API_KEY and PORKBUN_SECRET_KEY):
-            tasks.append(self.porkbun.check_domains(all_domains_to_check, request.domain_preference, request.max_price, input_source))
+            tasks.append(self.porkbun.check_domains(all_domains_to_check, request.domain_preference.value, request.max_price, input_source))
             providers_to_use.append("porkbun")
-        
-        # Name.com
-        if (request.provider_preference in [ProviderPreference.NAMECOM, ProviderPreference.ANY] and 
+        if (request.provider_preference in [ProviderPreference.NAMECOM, ProviderPreference.ANY] and
             NAMECOM_API_TOKEN and NAMECOM_USERNAME):
-            tasks.append(self.namecom.check_domains(all_domains_to_check, request.domain_preference, request.max_price, input_source))
+            tasks.append(self.namecom.check_domains(all_domains_to_check, request.domain_preference.value, request.max_price, input_source))
             providers_to_use.append("name.com")
-        
+
         if not tasks:
             available_providers = []
             if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
@@ -772,49 +765,43 @@ class DomainSuggestionAgent:
                 error_msg += "No providers are configured with valid API credentials."
             
             raise HTTPException(status_code=500, detail=error_msg)
-        
-        # Execute searches in parallel
+
         provider_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Combine results from all providers
-        all_results = []
         search_summary["providers_used"] = providers_to_use
-        
+
+        # Combine, deduplicate, and sort results
+        unique_results: Dict[str, DomainResult] = {}
         for i, results in enumerate(provider_results):
             if isinstance(results, Exception):
                 provider_name = providers_to_use[i] if i < len(providers_to_use) else "unknown"
                 search_summary["errors"].append(f"{provider_name}: {str(results)}")
                 continue
-            
+
             if results:
-                search_summary["domains_actually_checked"] += len(results)
-                available_results = [r for r in results if r.available]
-                search_summary["available_domains_found"] += len(available_results)
-                all_results.extend(available_results)
+                search_summary["domains_actually_checked_by_providers"] += len(results)
+                for r in results:
+                    # Only add if available and not already present (first provider wins for pricing)
+                    if r.available and r.domain not in unique_results:
+                        unique_results[r.domain] = r
         
-    
-    def safe_cache_set(redis_client, key: str, value: dict, expiry: int):
-        if not redis_client:
-            return False
-        try:
-            redis_client.setex(key, expiry, json.dumps(value, default=str))
-            return True
-        except Exception as e:
-            print(f"Cache write error for key {key}: {e}")
-            return False
+        # Sort the unique, available domains by score (highest first)
+        sorted_domains = sorted(
+            unique_results.values(), 
+            key=lambda d: d.score, 
+            reverse=True
+        )
 
-    def safe_cache_get(redis_client, key: str):
-        if not redis_client:
-            return None
-        try:
-            cached = redis_client.get(key)
-            if cached:
-                return json.loads(cached)
-            return None
-        except Exception as e:
-            print(f"Cache read error for key {key}: {e}")
-            return None
+        # Limit the final results to the number requested
+        final_domains = sorted_domains[:request.num_choices]
+        search_summary["available_domains_found"] = len(final_domains)
 
+        # Construct and return the DomainResponse object
+        return DomainResponse(
+            domains=final_domains,
+            request_id=str(uuid.uuid4()),
+            timestamp=datetime.now(),
+            search_summary=search_summary
+        )
 
 # Initialize AI agent
 domain_agent = DomainSuggestionAgent()
