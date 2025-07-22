@@ -41,11 +41,22 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Changed from OpenAI to Gemin
 print(f"Loaded Porkbun API Key: {'✅ Yes' if PORKBUN_API_KEY else '❌ No'}")
 print(f"Loaded Porkbun Secret: {'✅ Yes' if PORKBUN_SECRET_KEY else '❌ No'}")
 
-# Redis client
-try:
-    redis_client = redis.from_url(REDIS_URL)
-except:
-    redis_client = None
+# Redis client with better error handling
+def get_redis_client():
+    try:
+        client = redis.from_url(REDIS_URL)
+        # Test the connection
+        client.ping()
+        print("✅ Redis connected successfully")
+        return client
+    except redis.ConnectionError:
+        print("❌ Redis not available - running without caching")
+        return None
+    except Exception as e:
+        print(f"❌ Redis error: {e} - running without caching")
+        return None
+
+redis_client = get_redis_client()
 
 # Models
 class DomainStyle(str, Enum):
@@ -166,11 +177,14 @@ class DomainSuggestionAgent:
                 # Check cache first
                 cache_key = f"domain:{domain_name}"
                 if redis_client:
-                    cached = redis_client.get(cache_key)
-                    if cached:
-                        result_data = json.loads(cached)
-                        results.append(DomainResult(**result_data))
-                        continue
+                    try:
+                        cached = redis_client.get(cache_key)
+                        if cached:
+                            result_data = json.loads(cached)
+                            results.append(DomainResult(**result_data))
+                            continue
+                    except Exception as e:
+                        print(f"Redis read error: {e}")
                 
                 # Query Porkbun API
                 async with httpx.AsyncClient() as client:
@@ -233,12 +247,17 @@ class DomainSuggestionAgent:
                         score=self.calculate_domain_score(domain_name, is_available, price_first_year)
                     )
                     
-                    # Cache result for 1 hour
+                    # Cache result with smart expiration
                     if redis_client:
-                        redis_client.setex(
-                            cache_key, 3600, 
-                            json.dumps(result.dict())
-                        )
+                        try:
+                            # Cache available domains for 2 hours, taken domains for 24 hours
+                            expiry = 7200 if is_available else 86400
+                            redis_client.setex(
+                                cache_key, expiry, 
+                                json.dumps(result.dict())
+                            )
+                        except Exception as e:
+                            print(f"Redis write error: {e}")
                     
                     results.append(result)
                 
