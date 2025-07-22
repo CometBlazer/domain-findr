@@ -50,15 +50,64 @@ print(f"Loaded Name.com Username: {'✅ Yes' if NAMECOM_USERNAME else '❌ No'}"
 # Redis client with better error handling
 def get_redis_client():
     try:
-        client = redis.from_url(REDIS_URL)
+        redis_url = REDIS_URL
+
+        if redis_url.startswith('rediss://'):
+            client = redis.from_url(
+                redis_url,
+                ssl_cert_reqs=None,
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
+                health_check_interval=30
+            )
+        else:
+            client = redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True
+            )
+
         client.ping()
-        print("✅ Redis connected successfully")
+        print(f"✅ Redis connected successfully to: {redis_url.split('@')[1] if '@' in redis_url else 'localhost'}")
         return client
-    except redis.ConnectionError:
-        print("❌ Redis not available - running without caching")
+
+    except redis.ConnectionError as e:
+        print(f"❌ Redis connection failed: {e}")
+        print("🔄 Running without caching (Redis unavailable)")
+        return None
+    except redis.AuthenticationError as e:
+        print(f"❌ Redis authentication failed: {e}")
+        print("🔧 Check your REDIS_URL and token")
         return None
     except Exception as e:
         print(f"❌ Redis error: {e} - running without caching")
+        return None
+
+# Cache utility functions
+def safe_cache_set(redis_client, key: str, value: dict, expiry: int):
+    if not redis_client:
+        return False
+    try:
+        redis_client.setex(key, expiry, json.dumps(value, default=str))
+        return True
+    except Exception as e:
+        print(f"Cache write error for key {key}: {e}")
+        return False
+
+def safe_cache_get(redis_client, key: str):
+    if not redis_client:
+        return None
+    try:
+        cached = redis_client.get(key)
+        if cached:
+            return json.loads(cached)
+        return None
+    except Exception as e:
+        print(f"Cache read error for key {key}: {e}")
         return None
 
 redis_client = get_redis_client()
@@ -310,16 +359,11 @@ class PorkbunProvider(BaseDomainProvider):
             try:
                 # Check cache first
                 cache_key = f"porkbun:domain:{domain_name}"
-                if redis_client:
-                    try:
-                        cached = redis_client.get(cache_key)
-                        if cached:
-                            result_data = json.loads(cached)
-                            result_data['input_source'] = input_source
-                            results.append(DomainResult(**result_data))
-                            continue
-                    except Exception as e:
-                        print(f"Redis read error: {e}")
+                cached_data = safe_cache_get(redis_client, cache_key)
+                if cached_data:
+                    cached_data['input_source'] = input_source
+                    results.append(DomainResult(**cached_data))
+                    continue
                 
                 async with httpx.AsyncClient() as client:
                     availability_response = await client.post(
@@ -386,12 +430,8 @@ class PorkbunProvider(BaseDomainProvider):
                     )
                     
                     # Cache result
-                    if redis_client:
-                        try:
-                            expiry = 7200 if is_available else 86400
-                            redis_client.setex(cache_key, expiry, json.dumps(result.dict()))
-                        except Exception as e:
-                            print(f"Redis write error: {e}")
+                    expiry = 7200 if is_available else 86400
+                    safe_cache_set(redis_client, cache_key, result.dict(), expiry)
                     
                     results.append(result)
                     
@@ -489,13 +529,9 @@ class NameComProvider(BaseDomainProvider):
                     )
                     
                     # Cache result
-                    if redis_client:
-                        try:
-                            cache_key = f"namecom:domain:{domain_name}"
-                            expiry = 7200 if is_available else 86400
-                            redis_client.setex(cache_key, expiry, json.dumps(result.dict()))
-                        except Exception as e:
-                            print(f"Redis write error: {e}")
+                    cache_key = f"namecom:domain:{domain_name}"
+                    expiry = 7200 if is_available else 86400
+                    safe_cache_set(redis_client, cache_key, result.dict(), expiry)
                     
                     results.append(result)
                 
@@ -756,28 +792,29 @@ class DomainSuggestionAgent:
                 search_summary["available_domains_found"] += len(available_results)
                 all_results.extend(available_results)
         
-        # Remove duplicates (same domain from different providers) if using any/multiple providers
-        if request.provider_preference == ProviderPreference.ANY:
-            seen_domains = set()
-            unique_results = []
-            for result in all_results:
-                if result.domain not in seen_domains:
-                    seen_domains.add(result.domain)
-                    unique_results.append(result)
-            all_results = unique_results
-        
-        # Sort by score (best domains first)
-        all_results.sort(key=lambda x: x.score, reverse=True)
-        
-        # Limit to requested number
-        final_domains = all_results[:request.num_choices]
-        
-        return DomainResponse(
-            domains=final_domains,
-            request_id=f"req_{datetime.utcnow().timestamp()}",
-            timestamp=datetime.utcnow(),
-            search_summary=search_summary
-        )
+    
+    def safe_cache_set(redis_client, key: str, value: dict, expiry: int):
+        if not redis_client:
+            return False
+        try:
+            redis_client.setex(key, expiry, json.dumps(value, default=str))
+            return True
+        except Exception as e:
+            print(f"Cache write error for key {key}: {e}")
+            return False
+
+    def safe_cache_get(redis_client, key: str):
+        if not redis_client:
+            return None
+        try:
+            cached = redis_client.get(key)
+            if cached:
+                return json.loads(cached)
+            return None
+        except Exception as e:
+            print(f"Cache read error for key {key}: {e}")
+            return None
+
 
 # Initialize AI agent
 domain_agent = DomainSuggestionAgent()
