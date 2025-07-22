@@ -197,21 +197,10 @@ class PorkbunProvider(BaseDomainProvider):
         # Porkbun: 1 domain per 10 seconds - very limited
         limited_domains = domains[:2]  # Limit to 2 domains for Porkbun
         
+        # Since domains now come with TLDs already attached (like "appx.com"), use them directly
+        full_domain_list = limited_domains
+        
         for i, domain_name in enumerate(full_domain_list):
-            # Add TLD if not present  
-            full_domain_list = []
-            for domain_name in limited_domains:
-                if '.' not in domain_name:
-                    # This shouldn't happen now since domains come with TLDs
-                    if hasattr(tld_preference, 'value'):
-                        tld = tld_preference.value
-                    else:
-                        tld = str(tld_preference)
-                    if not tld.startswith('.'):
-                        tld = f".{tld}"
-                    domain_name = f"{domain_name}{tld}"
-                full_domain_list.append(domain_name)
-            
             try:
                 # Check cache first
                 cache_key = f"porkbun:domain:{domain_name}"
@@ -307,7 +296,7 @@ class PorkbunProvider(BaseDomainProvider):
                 continue
         
         return results
-
+    
 # Name.com Provider  
 class NameComProvider(BaseDomainProvider):
     def __init__(self):
