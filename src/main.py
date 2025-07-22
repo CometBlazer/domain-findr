@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, validator
+from typing import List, Optional, Dict, Any, Union
 import httpx
 import os
 import json
@@ -12,6 +12,7 @@ from enum import Enum
 import logging
 from dotenv import load_dotenv
 import base64
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,7 +21,7 @@ load_dotenv()
 app = FastAPI(
     title="Domain Finder API",
     description="AI-powered domain name suggestion API with multi-provider support",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # CORS middleware for NextJS frontend
@@ -112,14 +113,48 @@ class ProviderPreference(str, Enum):
     NAMECOM = "name.com"
     ANY = "any"
 
+class InputType(str, Enum):
+    IDEA = "idea"  # Generate suggestions based on business idea/field
+    EXACT_NAME = "exact_name"  # Check specific domain name(s)
+    BASE_NAME = "base_name"  # Check base name with different TLDs
+
 class DomainRequest(BaseModel):
-    idea: str = Field(..., description="Business idea or concept")
-    field: str = Field(..., description="Industry or field")
-    style: DomainStyle = Field(default=DomainStyle.BRANDABLE)
+    # Main input - can be idea, base name, or exact domain
+    input_text: str = Field(..., description="Business idea, base domain name, or exact domain(s) to check")
+    
+    # Input type specification
+    input_type: InputType = Field(default=InputType.IDEA, description="Type of input provided")
+    
+    # Optional fields for idea-based generation
+    field: Optional[str] = Field(default="", description="Industry or field (optional for exact name/base name checks)")
+    style: DomainStyle = Field(default=DomainStyle.BRANDABLE, description="Style for AI generation (ignored for exact names)")
+    
+    # Domain preferences
     domain_preference: DomainPreference = Field(default=DomainPreference.COM)
-    provider_preference: ProviderPreference = Field(default=ProviderPreference.ANY, description="Which domain provider(s) to use")
+    provider_preference: ProviderPreference = Field(default=ProviderPreference.ANY)
     max_price: float = Field(default=50.0, description="Maximum price per year")
     num_choices: int = Field(default=5, ge=1, le=20)
+    
+    # Additional exact domains (for bulk checking)
+    additional_domains: Optional[List[str]] = Field(default=[], description="Additional exact domains to check")
+
+    @validator('input_text')
+    def validate_input_text(cls, v):
+        if not v or len(v.strip()) < 1:
+            raise ValueError('Input text cannot be empty')
+        return v.strip()
+    
+    @validator('additional_domains')
+    def validate_additional_domains(cls, v):
+        if v:
+            # Clean up the domains
+            cleaned = []
+            for domain in v:
+                domain = domain.strip().lower()
+                if domain and domain not in cleaned:
+                    cleaned.append(domain)
+            return cleaned
+        return []
 
 class DomainResult(BaseModel):
     domain: str
@@ -130,6 +165,7 @@ class DomainResult(BaseModel):
     deal_info: Optional[str] = None
     score: float = Field(description="AI ranking score")
     pricing_details: Optional[Dict[str, Any]] = None
+    input_source: str = Field(description="How this domain was generated (ai_generated, user_provided, base_expansion)")
 
 class DomainResponse(BaseModel):
     domains: List[DomainResult]
@@ -137,7 +173,68 @@ class DomainResponse(BaseModel):
     timestamp: datetime
     search_summary: Dict[str, Any]
 
-# Base Domain Provider class
+# Utility functions for input parsing
+class InputParser:
+    @staticmethod
+    def detect_input_type(input_text: str) -> InputType:
+        """Auto-detect the input type based on the text"""
+        input_text = input_text.strip().lower()
+        
+        # Check if it contains a TLD (exact domain)
+        tld_pattern = r'\.(com|net|org|io|co|ly|app|dev|ai|tech|online|site|website|store|shop|biz|info|me|cc|tv|so|xyz|cloud|digital|agency|studio|design|media|services|solutions|consulting|lab|academy|institute)$'
+        if re.search(tld_pattern, input_text):
+            return InputType.EXACT_NAME
+        
+        # Check if it's a simple word/phrase without spaces (likely a base name)
+        if ' ' not in input_text and len(input_text.split('.')) == 1 and len(input_text) <= 20:
+            return InputType.BASE_NAME
+        
+        # Default to idea-based generation
+        return InputType.IDEA
+    
+    @staticmethod
+    def parse_input(request: DomainRequest) -> tuple[List[str], InputType]:
+        """Parse the input and return domains to check and confirmed input type"""
+        input_text = request.input_text.strip().lower()
+        
+        # Use provided input_type, or auto-detect if set to default
+        input_type = request.input_type
+        if input_type == InputType.IDEA:
+            # Check if auto-detection suggests otherwise
+            detected_type = InputParser.detect_input_type(input_text)
+            if detected_type != InputType.IDEA:
+                input_type = detected_type
+        
+        domains_to_check = []
+        
+        if input_type == InputType.EXACT_NAME:
+            # Exact domain name(s) provided
+            domains_to_check.append(input_text)
+            # Add additional domains if provided
+            domains_to_check.extend(request.additional_domains)
+            
+        elif input_type == InputType.BASE_NAME:
+            # Base name provided - generate with different TLDs
+            base_name = input_text
+            if request.domain_preference == DomainPreference.ANY:
+                # Generate with multiple popular TLDs
+                popular_tlds = [".com", ".net", ".org", ".io", ".co", ".app", ".dev"]
+                domains_to_check = [f"{base_name}{tld}" for tld in popular_tlds]
+            else:
+                # Use specified TLD
+                tld = request.domain_preference.value
+                domains_to_check = [f"{base_name}{tld}"]
+            
+            # Add additional domains if provided
+            domains_to_check.extend(request.additional_domains)
+            
+        else:  # InputType.IDEA
+            # Will be handled by AI generation
+            domains_to_check = []
+        
+        return domains_to_check, input_type
+
+# Base Domain Provider class (unchanged)
 class BaseDomainProvider:
     def __init__(self, name: str):
         self.name = name
@@ -145,12 +242,18 @@ class BaseDomainProvider:
     async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
         raise NotImplementedError
     
-    def calculate_domain_score(self, domain: str, is_available: bool, price: Optional[float] = None) -> float:
+    def calculate_domain_score(self, domain: str, is_available: bool, price: Optional[float] = None, input_source: str = "ai_generated") -> float:
         """Calculate AI-based domain score"""
         score = 0.0
         
         if not is_available:
             return 0.0
+        
+        # Base score for user-provided domains (they know what they want)
+        if input_source == "user_provided":
+            score += 2.0
+        elif input_source == "base_expansion":
+            score += 1.0
         
         # Length score (shorter is better)
         length = len(domain.split('.')[0])
@@ -191,22 +294,19 @@ class BaseDomainProvider:
         
         return min(score, 5.0)
 
-# Porkbun Provider
+# Porkbun Provider (updated to include input_source)
 class PorkbunProvider(BaseDomainProvider):
     def __init__(self):
         super().__init__("porkbun")
     
-    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
+    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0, input_source: str = "ai_generated") -> List[DomainResult]:
         """Check domain availability using Porkbun API with rate limiting"""
         results = []
         
         # Porkbun: 1 domain per 10 seconds - very limited
-        limited_domains = domains[:2]  # Limit to 2 domains for Porkbun
+        limited_domains = domains[:5] if input_source != "user_provided" else domains[:10]
 
-        # Since domains now come with TLDs already attached (like "appx.com"), use them directly
-        full_domain_list = limited_domains
-        
-        for i, domain_name in enumerate(full_domain_list):
+        for i, domain_name in enumerate(limited_domains):
             try:
                 # Check cache first
                 cache_key = f"porkbun:domain:{domain_name}"
@@ -215,6 +315,7 @@ class PorkbunProvider(BaseDomainProvider):
                         cached = redis_client.get(cache_key)
                         if cached:
                             result_data = json.loads(cached)
+                            result_data['input_source'] = input_source
                             results.append(DomainResult(**result_data))
                             continue
                     except Exception as e:
@@ -254,7 +355,7 @@ class PorkbunProvider(BaseDomainProvider):
                         
                         # Filter by max_price - check both first year and annual price
                         if price_first_year > max_price or price_annual > max_price:
-                            continue  # Skip domains that exceed the budget
+                            continue
                         
                         additional = response_data.get("additional", {})
                         if additional:
@@ -280,7 +381,8 @@ class PorkbunProvider(BaseDomainProvider):
                         registrar="porkbun",
                         deal_info=deal_info,
                         pricing_details=pricing_details,
-                        score=self.calculate_domain_score(domain_name, is_available, price_first_year)
+                        score=self.calculate_domain_score(domain_name, is_available, price_first_year, input_source),
+                        input_source=input_source
                     )
                     
                     # Cache result
@@ -293,9 +395,10 @@ class PorkbunProvider(BaseDomainProvider):
                     
                     results.append(result)
                     
-                    # Rate limiting: wait between requests
-                    if i < len(full_domain_list) - 1:
-                        await asyncio.sleep(10)
+                    # Rate limiting: wait between requests (shorter for user-provided domains)
+                    if i < len(limited_domains) - 1:
+                        wait_time = 5 if input_source == "user_provided" else 10
+                        await asyncio.sleep(wait_time)
                 
             except Exception as e:
                 logging.error(f"Porkbun error checking domain {domain_name}: {e}")
@@ -303,30 +406,17 @@ class PorkbunProvider(BaseDomainProvider):
         
         return results
 
-# Name.com Provider  
+# Name.com Provider (updated to include input_source)
 class NameComProvider(BaseDomainProvider):
     def __init__(self):
         super().__init__("name.com")
     
-    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0) -> List[DomainResult]:
+    async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0, input_source: str = "ai_generated") -> List[DomainResult]:
         """Check domain availability using Name.com API"""
         results = []
         
-        # Name.com allows up to 50 domains per call - much better!
-        limited_domains = domains[:10]  # Check up to 10 domains
-        
-        # Prepare domain list with TLD
-        domain_list = []
-        for domain_name in limited_domains:
-            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io', '.co']):
-                if hasattr(tld_preference, 'value'):
-                    tld = tld_preference.value
-                else:
-                    tld = str(tld_preference)
-                if not tld.startswith('.'):
-                    tld = f".{tld}"
-                domain_name = f"{domain_name}{tld}"
-            domain_list.append(domain_name)
+        # Name.com allows up to 50 domains per call
+        limited_domains = domains[:20] if input_source != "user_provided" else domains[:50]
         
         try:
             # Create Basic Auth header
@@ -338,7 +428,7 @@ class NameComProvider(BaseDomainProvider):
                 # Name.com bulk availability check
                 availability_response = await client.post(
                     "https://api.name.com/v4/domains:checkAvailability",
-                    json={"domainNames": domain_list},
+                    json={"domainNames": limited_domains},
                     headers={
                         "Authorization": f"Basic {auth_b64}",
                         "Content-Type": "application/json"
@@ -352,7 +442,6 @@ class NameComProvider(BaseDomainProvider):
                     return results
                 
                 availability_data = availability_response.json()
-                print(f"Name.com API Response: {availability_data}")  # Debug line
                 
                 # Process results
                 for domain_info in availability_data.get("results", []):
@@ -366,13 +455,12 @@ class NameComProvider(BaseDomainProvider):
                     deal_info = None
                     
                     if is_available:
-                        # Name.com API returns prices in dollars
                         price_first_year = float(domain_info.get("purchasePrice", 0))
                         price_annual = float(domain_info.get("renewalPrice", 0))
                         
-                        # Filter by max_price - check both first year and annual price
+                        # Filter by max_price
                         if price_first_year > max_price or price_annual > max_price:
-                            continue  # Skip domains that exceed the budget
+                            continue
                         
                         pricing_details = {
                             "registration": price_first_year,
@@ -384,7 +472,6 @@ class NameComProvider(BaseDomainProvider):
                         if price_first_year != price_annual and price_annual > 0:
                             deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
                         
-                        # Add premium indicator to deal_info if it's a premium domain
                         if domain_info.get("premium", False) or purchase_type in ["aftermarket_s", "aftermarket"]:
                             premium_info = f"Premium domain ({purchase_type})"
                             deal_info = f"{deal_info} - {premium_info}" if deal_info else premium_info
@@ -397,7 +484,8 @@ class NameComProvider(BaseDomainProvider):
                         registrar="name.com",
                         deal_info=deal_info,
                         pricing_details=pricing_details,
-                        score=self.calculate_domain_score(domain_name, is_available, price_first_year)
+                        score=self.calculate_domain_score(domain_name, is_available, price_first_year, input_source),
+                        input_source=input_source
                     )
                     
                     # Cache result
@@ -416,6 +504,7 @@ class NameComProvider(BaseDomainProvider):
         
         return results
 
+# Updated Domain Suggestion Agent
 class DomainSuggestionAgent:
     def __init__(self):
         self.client = httpx.AsyncClient()
@@ -433,8 +522,8 @@ class DomainSuggestionAgent:
     
     async def generate_domain_ideas(self, request: DomainRequest) -> List[str]:
         """Generate domain name ideas using AI logic"""
-        base_words = request.idea.lower().split()
-        field_words = request.field.lower().split()
+        base_words = request.input_text.lower().split()
+        field_words = request.field.lower().split() if request.field else []
         
         suggestions = []
         
@@ -482,7 +571,7 @@ class DomainSuggestionAgent:
         
         return suggestions[:30]  # Generate base names without TLDs
 
-    def generate_domain_combinations(self, base_names: List[str], request: DomainRequest) -> List[str]:
+    def generate_domain_combinations(self, base_names: List[str], request: DomainRequest) -> tuple[List[str], List[tuple]]:
         """Generate all domain combinations with TLDs and rank them"""
         
         # Determine which TLDs to use
@@ -533,7 +622,7 @@ class DomainSuggestionAgent:
             '.online': 1.4, '.site': 1.3, '.store': 1.2, '.shop': 1.2,
             '.me': 1.1, '.cc': 1.0, '.tv': 1.0, '.xyz': 0.8, '.biz': 0.7
         }
-        score += tld_scores.get(tld, 0.5)  # Default score for other TLDs
+        score += tld_scores.get(tld, 0.5)
         
         # Readability (no numbers, easy to type)
         if domain_name.isalpha():
@@ -546,8 +635,8 @@ class DomainSuggestionAgent:
             score += 1.0
         
         # Keyword relevance
-        idea_words = request.idea.lower().split()
-        field_words = request.field.lower().split()
+        idea_words = request.input_text.lower().split()
+        field_words = request.field.lower().split() if request.field else []
         all_keywords = idea_words + field_words
         
         for keyword in all_keywords:
@@ -564,31 +653,73 @@ class DomainSuggestionAgent:
         elif request.style == DomainStyle.PROFESSIONAL and any(prof in domain_name for prof in ['tech', 'pro', 'corp', 'group']):
             score += 1.0
         
-        return min(score, 10.0)  # Cap at 10.0
+        return min(score, 10.0)
 
-    async def search_domains_parallel(self, domains: List[str], request: DomainRequest) -> DomainResponse:
-        """Search domains using selected providers"""
+    async def search_domains_parallel(self, request: DomainRequest) -> DomainResponse:
+        """Search domains using selected providers with new input support"""
         
-        # Generate all domain combinations and rank them
-        base_names = await self.generate_domain_ideas(request)
-        top_domains, all_combinations = self.generate_domain_combinations(base_names, request)
+        # Parse input to get domains to check
+        direct_domains, actual_input_type = InputParser.parse_input(request)
         
-        print(f"Generated {len(all_combinations)} total combinations, checking top {len(top_domains)}")
+        all_domains_to_check = []
+        search_summary = {
+            "input_type": actual_input_type.value,
+            "original_input": request.input_text,
+            "providers_used": [],
+            "provider_selection": request.provider_preference.value,
+            "domains_actually_checked": 0,
+            "available_domains_found": 0,
+            "errors": [],
+            "generation_method": {}
+        }
         
-        # Build provider tasks based on user selection
+        if actual_input_type == InputType.IDEA:
+            # Generate AI suggestions
+            base_names = await self.generate_domain_ideas(request)
+            top_domains, all_combinations = self.generate_domain_combinations(base_names, request)
+            all_domains_to_check = top_domains
+            
+            search_summary["generation_method"] = {
+                "type": "ai_generated",
+                "base_names_generated": len(base_names),
+                "total_combinations": len(all_combinations),
+                "top_selected": len(top_domains)
+            }
+            input_source = "ai_generated"
+            
+        elif actual_input_type == InputType.BASE_NAME:
+            # Base name expansion
+            all_domains_to_check = direct_domains
+            search_summary["generation_method"] = {
+                "type": "base_expansion",
+                "base_name": request.input_text,
+                "domains_generated": len(direct_domains)
+            }
+            input_source = "base_expansion"
+            
+        else:  # InputType.EXACT_NAME
+            # Exact domain checking
+            all_domains_to_check = direct_domains
+            search_summary["generation_method"] = {
+                "type": "user_provided",
+                "exact_domains": direct_domains
+            }
+            input_source = "user_provided"
+        
+        # Build provider tasks
         tasks = []
         providers_to_use = []
         
         # Porkbun
         if (request.provider_preference in [ProviderPreference.PORKBUN, ProviderPreference.ANY] and 
             PORKBUN_API_KEY and PORKBUN_SECRET_KEY):
-            tasks.append(self.porkbun.check_domains(top_domains, request.domain_preference, request.max_price))
+            tasks.append(self.porkbun.check_domains(all_domains_to_check, request.domain_preference, request.max_price, input_source))
             providers_to_use.append("porkbun")
         
         # Name.com
         if (request.provider_preference in [ProviderPreference.NAMECOM, ProviderPreference.ANY] and 
             NAMECOM_API_TOKEN and NAMECOM_USERNAME):
-            tasks.append(self.namecom.check_domains(top_domains, request.domain_preference, request.max_price))
+            tasks.append(self.namecom.check_domains(all_domains_to_check, request.domain_preference, request.max_price, input_source))
             providers_to_use.append("name.com")
         
         if not tasks:
@@ -611,15 +742,7 @@ class DomainSuggestionAgent:
         
         # Combine results from all providers
         all_results = []
-        search_summary = {
-            "providers_used": providers_to_use,
-            "provider_selection": request.provider_preference.value,
-            "total_domain_combinations_generated": len(all_combinations),
-            "top_domains_checked": top_domains,
-            "domains_actually_checked": 0,
-            "available_domains_found": 0,
-            "errors": []
-        }
+        search_summary["providers_used"] = providers_to_use
         
         for i, results in enumerate(provider_results):
             if isinstance(results, Exception):
@@ -706,7 +829,6 @@ async def test_namecom_connection():
     except Exception as e:
         return {"status": "error", "provider": "name.com", "message": str(e)}
 
-# Test Porkbun only
 @app.get("/api/test-providers")
 async def test_all_providers():
     """Test all available providers"""
@@ -735,16 +857,54 @@ async def test_all_providers():
     else:
         results["porkbun"] = {"status": "not_configured", "message": "Missing API credentials"}
     
+    # Test Name.com
+    if NAMECOM_API_TOKEN and NAMECOM_USERNAME:
+        try:
+            auth_string = f"{NAMECOM_USERNAME}:{NAMECOM_API_TOKEN}"
+            auth_bytes = auth_string.encode('ascii')
+            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.name.com/v4/hello",
+                    headers={"Authorization": f"Basic {auth_b64}"},
+                    timeout=10.0
+                )
+                
+                if response.status_code == 200:
+                    results["namecom"] = {"status": "success", "response": response.json()}
+                else:
+                    results["namecom"] = {"status": "error", "message": response.text}
+        except Exception as e:
+            results["namecom"] = {"status": "error", "message": str(e)}
+    else:
+        results["namecom"] = {"status": "not_configured", "message": "Missing API credentials"}
+    
     return results
+
+# Input parsing endpoint for testing
+@app.post("/api/parse-input")
+async def parse_input_endpoint(request: DomainRequest):
+    """Test endpoint to see how input is parsed"""
+    domains_to_check, detected_type = InputParser.parse_input(request)
+    
+    return {
+        "original_input": request.input_text,
+        "provided_input_type": request.input_type.value,
+        "detected_input_type": detected_type.value,
+        "domains_to_check": domains_to_check,
+        "additional_domains": request.additional_domains,
+        "auto_detection": InputParser.detect_input_type(request.input_text).value
+    }
 
 # Main API Routes
 @app.post("/api/domains/suggest", response_model=DomainResponse)
 async def suggest_domains(request: DomainRequest):
-    """Main endpoint: suggest domain names using multiple providers"""
+    """Main endpoint: suggest domain names with support for different input types"""
     
     try:
-        # Generate domain suggestions and rank them
-        response = await domain_agent.search_domains_parallel([], request)
+        # Generate domain suggestions based on input type
+        response = await domain_agent.search_domains_parallel(request)
         
         return response
         
@@ -760,11 +920,12 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow(),
-        "version": "2.0.0",
+        "version": "2.1.0",
         "providers": {
             "porkbun": bool(PORKBUN_API_KEY and PORKBUN_SECRET_KEY),
             "namecom": bool(NAMECOM_API_TOKEN and NAMECOM_USERNAME)
-        }
+        },
+        "supported_input_types": [input_type.value for input_type in InputType]
     }
 
 @app.get("/api/pricing")
@@ -775,7 +936,7 @@ async def get_pricing():
         "message": "API is currently free during development phase",
         "providers": {
             "porkbun": {
-                "rate_limit": "1 domain per 10 seconds",
+                "rate_limit": "1 domain per 10 seconds (5 seconds for user-provided domains)",
                 "pricing": "Variable by TLD",
                 "bulk_check": "1 domain at a time"
             },
@@ -789,6 +950,67 @@ async def get_pricing():
             "porkbun": "Use only Porkbun (slower but sometimes different pricing)",
             "name.com": "Use only Name.com (faster bulk checking)",
             "any": "Use all available providers (best coverage, removes duplicates)"
+        },
+        "input_types": {
+            "idea": "Generate AI suggestions based on business idea and field",
+            "exact_name": "Check specific domain name(s) like 'google.com'",
+            "base_name": "Check base name with different TLDs like 'google' → 'google.com', 'google.io', etc."
+        }
+    }
+
+@app.get("/api/examples")
+async def get_examples():
+    """Get example API requests for different input types"""
+    return {
+        "idea_based": {
+            "description": "Generate AI suggestions based on business concept",
+            "example": {
+                "input_text": "artificial intelligence startup",
+                "input_type": "idea",
+                "field": "technology",
+                "style": "brandable",
+                "domain_preference": ".com",
+                "num_choices": 5
+            }
+        },
+        "base_name": {
+            "description": "Check a base name with different TLDs",
+            "example": {
+                "input_text": "mycompany",
+                "input_type": "base_name",
+                "domain_preference": "any",  # Will check .com, .io, .net, etc.
+                "num_choices": 10
+            }
+        },
+        "exact_domain": {
+            "description": "Check specific domain(s)",
+            "example": {
+                "input_text": "mycompany.com",
+                "input_type": "exact_name",
+                "additional_domains": ["mycompany.io", "mycompany.net"],
+                "num_choices": 10
+            }
+        },
+        "auto_detection": {
+            "description": "Let the API auto-detect input type",
+            "examples": [
+                {
+                    "input_text": "google.com",
+                    "input_type": "idea",  # Will be auto-detected as exact_name
+                    "note": "API will detect this is an exact domain"
+                },
+                {
+                    "input_text": "myapp",
+                    "input_type": "idea",  # Will be auto-detected as base_name
+                    "note": "API will detect this is a base name"
+                },
+                {
+                    "input_text": "ai powered customer service platform",
+                    "input_type": "idea",  # Will stay as idea
+                    "field": "technology",
+                    "note": "API will detect this needs AI generation"
+                }
+            ]
         }
     }
 
