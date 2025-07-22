@@ -152,7 +152,7 @@ class DomainSuggestionAgent:
         
         for domain_name in domains:
             # Add TLD if not present
-            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io']):
+            if not any(domain_name.endswith(tld) for tld in ['.com', '.co', '.org', '.io']):
                 domain_name = f"{domain_name}.com"
             
             try:
