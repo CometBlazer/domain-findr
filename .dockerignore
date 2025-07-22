@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Environment & dependency management
+.env
+.env.*
+venv/
+.venv/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+poetry.lock
+Pipfile.lock
+
+# Logs and runtime files
+*.log
+*.pid
+*.gz
+
+# Tests
+tests/
+coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.coverage
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+
+# Git and version control
+.git/
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Frontend/node (if present)
+node_modules/
+build/
+dist/
+*.tsbuildinfo
+
+# Docker & CI
+Dockerfile
+.dockerignore
+
+# Output / temp files
+*.sqlite3
+*.bak
+*.tmp
+*.zip
