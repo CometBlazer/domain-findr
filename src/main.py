@@ -76,6 +76,35 @@ class DomainPreference(str, Enum):
     ORG = ".org"
     IO = ".io"
     CO = ".co"
+    LY = ".ly"
+    APP = ".app"
+    DEV = ".dev"
+    AI = ".ai"
+    TECH = ".tech"
+    ONLINE = ".online"
+    SITE = ".site"
+    WEBSITE = ".website"
+    STORE = ".store"
+    SHOP = ".shop"
+    BIZ = ".biz"
+    INFO = ".info"
+    ME = ".me"
+    CC = ".cc"
+    TV = ".tv"
+    SO = ".so"
+    XYZ = ".xyz"
+    CLOUD = ".cloud"
+    DIGITAL = ".digital"
+    AGENCY = ".agency"
+    STUDIO = ".studio"
+    DESIGN = ".design"
+    MEDIA = ".media"
+    SERVICES = ".services"
+    SOLUTIONS = ".solutions"
+    CONSULTING = ".consulting"
+    LAB = ".lab"
+    ACADEMY = ".academy"
+    INSTITUTE = ".institute"
     ANY = "any"
 
 class DomainRequest(BaseModel):
@@ -168,16 +197,20 @@ class PorkbunProvider(BaseDomainProvider):
         # Porkbun: 1 domain per 10 seconds - very limited
         limited_domains = domains[:2]  # Limit to 2 domains for Porkbun
         
-        for i, domain_name in enumerate(limited_domains):
-            # Add TLD if not present
-            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io', '.co']):
-                if hasattr(tld_preference, 'value'):
-                    tld = tld_preference.value
-                else:
-                    tld = str(tld_preference)
-                if not tld.startswith('.'):
-                    tld = f".{tld}"
-                domain_name = f"{domain_name}{tld}"
+        for i, domain_name in enumerate(full_domain_list):
+            # Add TLD if not present  
+            full_domain_list = []
+            for domain_name in limited_domains:
+                if '.' not in domain_name:
+                    # This shouldn't happen now since domains come with TLDs
+                    if hasattr(tld_preference, 'value'):
+                        tld = tld_preference.value
+                    else:
+                        tld = str(tld_preference)
+                    if not tld.startswith('.'):
+                        tld = f".{tld}"
+                    domain_name = f"{domain_name}{tld}"
+                full_domain_list.append(domain_name)
             
             try:
                 # Check cache first
@@ -266,7 +299,7 @@ class PorkbunProvider(BaseDomainProvider):
                     results.append(result)
                     
                     # Rate limiting: wait between requests
-                    if i < len(limited_domains) - 1:
+                    if i < len(full_domain_list) - 1:
                         await asyncio.sleep(10)
                 
             except Exception as e:
@@ -388,12 +421,20 @@ class NameComProvider(BaseDomainProvider):
         
         return results
 
-# Domain suggestion AI agent
 class DomainSuggestionAgent:
     def __init__(self):
         self.client = httpx.AsyncClient()
         self.porkbun = PorkbunProvider()
-        self.namecom = NameComProvider()
+        # Removed Name.com provider
+        
+        # All available TLDs for ranking
+        self.all_tlds = [
+            ".com", ".net", ".org", ".io", ".co", ".ly", ".app", ".dev", 
+            ".ai", ".tech", ".online", ".site", ".website", ".store", 
+            ".shop", ".biz", ".info", ".me", ".cc", ".tv", ".so", ".xyz",
+            ".cloud", ".digital", ".agency", ".studio", ".design", ".media",
+            ".services", ".solutions", ".consulting", ".lab", ".academy", ".institute"
+        ]
     
     async def generate_domain_ideas(self, request: DomainRequest) -> List[str]:
         """Generate domain name ideas using AI logic"""
@@ -408,15 +449,15 @@ class DomainSuggestionAgent:
             suggestions.extend([f"{word1[:3]}{word2[:3]}" for word1 in base_words for word2 in field_words])
         
         elif request.style == DomainStyle.BRANDABLE:
-            suffixes = ["ly", "fy", "hub", "lab", "pro", "go", "kit", "box"]
-            prefixes = ["get", "my", "the", "smart", "quick", "easy", "auto", "super"]
+            suffixes = ["ly", "fy", "hub", "lab", "pro", "go", "kit", "box", "co", "io"]
+            prefixes = ["get", "my", "the", "smart", "quick", "easy", "auto", "super", "pro", "meta"]
             
             for word in base_words + field_words:
                 suggestions.extend([f"{word}{suffix}" for suffix in suffixes])
                 suggestions.extend([f"{prefix}{word}" for prefix in prefixes])
         
         elif request.style == DomainStyle.KEYWORD:
-            keywords = ["online", "digital", "web", "app", "tech", "service", "cloud", "ai"]
+            keywords = ["online", "digital", "web", "app", "tech", "service", "cloud", "ai", "hub", "zone"]
             for word in base_words:
                 suggestions.extend([f"{word}{keyword}" for keyword in keywords])
                 suggestions.extend([f"{keyword}{word}" for keyword in keywords])
@@ -428,80 +469,155 @@ class DomainSuggestionAgent:
                 if len(no_vowels) >= 3:
                     variations.append(no_vowels)
                 
-                creative_endings = ["r", "d", "x", "z", "y"]
+                creative_endings = ["r", "d", "x", "z", "y", "ly", "fy"]
                 variations.extend([f"{word}{ending}" for ending in creative_endings])
             
             suggestions.extend(variations)
         
         elif request.style == DomainStyle.PROFESSIONAL:
-            prof_words = ["solutions", "services", "consulting", "group", "corp", "systems"]
+            prof_words = ["solutions", "services", "consulting", "group", "corp", "systems", "tech", "digital"]
             for word in base_words:
                 suggestions.extend([f"{word}{prof}" for prof in prof_words])
         
         # Clean and filter suggestions
         suggestions = list(set([
             s for s in suggestions 
-            if len(s) >= 3 and len(s) <= 15 and s.isalnum()
+            if len(s) >= 3 and len(s) <= 20 and s.replace('-', '').isalnum()
         ]))
         
-        # Generate more suggestions since we have two providers
-        return suggestions[:15]  # Generate up to 15 suggestions
+        return suggestions[:30]  # Generate base names without TLDs
+
+    def generate_domain_combinations(self, base_names: List[str], request: DomainRequest) -> List[str]:
+        """Generate all domain combinations with TLDs and rank them"""
+        
+        # Determine which TLDs to use
+        if request.domain_preference == DomainPreference.ANY:
+            tlds_to_use = self.all_tlds
+        else:
+            tlds_to_use = [request.domain_preference.value]
+        
+        # Generate all combinations
+        all_combinations = []
+        for base_name in base_names:
+            for tld in tlds_to_use:
+                domain = f"{base_name}{tld}"
+                score = self.calculate_pre_check_score(domain, request)
+                all_combinations.append((domain, score))
+        
+        # Sort by score (highest first) and return top domains
+        all_combinations.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return top 15 domains for checking
+        top_domains = [combo[0] for combo in all_combinations[:15]]
+        
+        return top_domains, all_combinations
+    
+    def calculate_pre_check_score(self, domain: str, request: DomainRequest) -> float:
+        """Calculate domain score BEFORE availability check for ranking"""
+        score = 0.0
+        
+        domain_parts = domain.split('.')
+        domain_name = domain_parts[0]
+        tld = '.' + domain_parts[1] if len(domain_parts) > 1 else ''
+        
+        # Length score (shorter is better for domain names)
+        length = len(domain_name)
+        if length <= 6:
+            score += 3.0
+        elif length <= 10:
+            score += 2.0
+        elif length <= 15:
+            score += 1.0
+        elif length <= 20:
+            score += 0.5
+        
+        # TLD score - popular TLDs get higher scores
+        tld_scores = {
+            '.com': 3.0, '.io': 2.5, '.app': 2.3, '.dev': 2.2, '.ai': 2.1,
+            '.net': 2.0, '.org': 1.9, '.co': 1.8, '.ly': 1.7, '.tech': 1.6,
+            '.online': 1.4, '.site': 1.3, '.store': 1.2, '.shop': 1.2,
+            '.me': 1.1, '.cc': 1.0, '.tv': 1.0, '.xyz': 0.8, '.biz': 0.7
+        }
+        score += tld_scores.get(tld, 0.5)  # Default score for other TLDs
+        
+        # Readability (no numbers, easy to type)
+        if domain_name.isalpha():
+            score += 1.0
+        
+        # Brandability (good vowel-consonant balance)
+        vowels = sum(1 for c in domain_name if c in 'aeiouAEIOU')
+        consonants = len(domain_name) - vowels
+        if vowels > 0 and consonants > 0 and vowels / len(domain_name) > 0.2:
+            score += 1.0
+        
+        # Keyword relevance
+        idea_words = request.idea.lower().split()
+        field_words = request.field.lower().split()
+        all_keywords = idea_words + field_words
+        
+        for keyword in all_keywords:
+            if keyword.lower() in domain_name.lower():
+                score += 1.5
+        
+        # Avoid hyphens and numbers (reduce score)
+        if '-' in domain_name or any(c.isdigit() for c in domain_name):
+            score -= 1.0
+        
+        # Style bonus
+        if request.style == DomainStyle.SHORT and length <= 6:
+            score += 1.0
+        elif request.style == DomainStyle.PROFESSIONAL and any(prof in domain_name for prof in ['tech', 'pro', 'corp', 'group']):
+            score += 1.0
+        
+        return min(score, 10.0)  # Cap at 10.0
 
     async def search_domains_parallel(self, domains: List[str], request: DomainRequest) -> DomainResponse:
-        """Search domains across multiple providers in parallel"""
+        """Search domains using only Porkbun"""
         
-        # Run both providers in parallel with max_price filtering
+        # Generate all domain combinations and rank them
+        base_names = await self.generate_domain_ideas(request)
+        top_domains, all_combinations = self.generate_domain_combinations(base_names, request)
+        
+        print(f"Generated {len(all_combinations)} total combinations, checking top {len(top_domains)}")
+        
+        # Run only Porkbun provider
         tasks = []
-        
         if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
-            tasks.append(self.porkbun.check_domains(domains, request.domain_preference, request.max_price))
-        
-        if NAMECOM_API_TOKEN and NAMECOM_USERNAME:
-            tasks.append(self.namecom.check_domains(domains, request.domain_preference, request.max_price))
+            tasks.append(self.porkbun.check_domains(top_domains, request.domain_preference, request.max_price))
         
         if not tasks:
             raise HTTPException(status_code=500, detail="No domain providers configured")
         
-        # Execute searches in parallel
+        # Execute searches
         provider_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Combine results from all providers
+        # Combine results
         all_results = []
         search_summary = {
-            "providers_used": [],
-            "total_domains_checked": 0,
+            "providers_used": ["porkbun"],
+            "total_domain_combinations_generated": len(all_combinations),
+            "top_domains_checked": top_domains,
+            "domains_actually_checked": 0,
             "available_domains_found": 0,
             "errors": []
         }
         
         for i, results in enumerate(provider_results):
             if isinstance(results, Exception):
-                provider_name = ["porkbun", "name.com"][i] if len(tasks) > 1 else "porkbun"
-                search_summary["errors"].append(f"{provider_name}: {str(results)}")
+                search_summary["errors"].append(f"porkbun: {str(results)}")
                 continue
             
             if results:
-                provider_name = results[0].registrar if results else "unknown"
-                search_summary["providers_used"].append(provider_name)
-                search_summary["total_domains_checked"] += len(results)
-                
+                search_summary["domains_actually_checked"] = len(results)
                 available_results = [r for r in results if r.available]
-                search_summary["available_domains_found"] += len(available_results)
+                search_summary["available_domains_found"] = len(available_results)
                 all_results.extend(available_results)
         
-        # Remove duplicates (same domain from different providers)
-        seen_domains = set()
-        unique_results = []
-        for result in all_results:
-            if result.domain not in seen_domains:
-                seen_domains.add(result.domain)
-                unique_results.append(result)
-        
         # Sort by score (best domains first)
-        unique_results.sort(key=lambda x: x.score, reverse=True)
+        all_results.sort(key=lambda x: x.score, reverse=True)
         
         # Limit to requested number
-        final_domains = unique_results[:request.num_choices]
+        final_domains = all_results[:request.num_choices]
         
         return DomainResponse(
             domains=final_domains,
@@ -539,26 +655,39 @@ async def test_porkbun_connection():
 
 @app.get("/api/test-namecom")
 async def test_namecom_connection():
-    """Test Name.com API connection"""
-    try:
-        auth_string = f"{NAMECOM_USERNAME}:{NAMECOM_API_TOKEN}"
-        auth_bytes = auth_string.encode('ascii')
-        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://api.name.com/v4/hello",
-                headers={"Authorization": f"Basic {auth_b64}"},
-                timeout=10.0
-            )
-            
-            if response.status_code == 200:
-                return {"status": "success", "provider": "name.com", "response": response.json()}
-            else:
-                return {"status": "error", "provider": "name.com", "message": response.text}
+    """Name.com testing disabled"""
+    return {"status": "disabled", "message": "Name.com provider has been disabled"}
+
+# Test Porkbun only
+@app.get("/api/test-providers")
+async def test_all_providers():
+    """Test all available providers"""
+    results = {}
+    
+    # Test Porkbun
+    if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.porkbun.com/api/json/v3/ping",
+                    json={
+                        "secretapikey": PORKBUN_SECRET_KEY,
+                        "apikey": PORKBUN_API_KEY
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=10.0
+                )
                 
-    except Exception as e:
-        return {"status": "error", "provider": "name.com", "message": str(e)}
+                if response.status_code == 200:
+                    results["porkbun"] = {"status": "success", "response": response.json()}
+                else:
+                    results["porkbun"] = {"status": "error", "message": response.text}
+        except Exception as e:
+            results["porkbun"] = {"status": "error", "message": str(e)}
+    else:
+        results["porkbun"] = {"status": "not_configured", "message": "Missing API credentials"}
+    
+    return results
 
 # Main API Routes
 @app.post("/api/domains/suggest", response_model=DomainResponse)
@@ -566,12 +695,8 @@ async def suggest_domains(request: DomainRequest):
     """Main endpoint: suggest domain names using multiple providers"""
     
     try:
-        # Generate domain suggestions using AI
-        domain_ideas = await domain_agent.generate_domain_ideas(request)
-        print(f"Generated {len(domain_ideas)} domain ideas: {domain_ideas}")
-        
-        # Search across multiple providers
-        response = await domain_agent.search_domains_parallel(domain_ideas, request)
+        # Generate domain suggestions and rank them
+        response = await domain_agent.search_domains_parallel([], request)
         
         return response
         
@@ -590,7 +715,7 @@ async def health_check():
         "version": "2.0.0",
         "providers": {
             "porkbun": bool(PORKBUN_API_KEY and PORKBUN_SECRET_KEY),
-            "namecom": bool(NAMECOM_API_TOKEN and NAMECOM_USERNAME)
+            "namecom": False  # Disabled
         }
     }
 
