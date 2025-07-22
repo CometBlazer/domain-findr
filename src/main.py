@@ -162,16 +162,27 @@ class DomainSuggestionAgent:
             if len(s) >= 3 and len(s) <= 15 and s.isalnum()
         ]))
         
-        return suggestions[:request.num_choices * 3]  # Generate more than needed for filtering
+        return suggestions[:3]  # Limit to 3 suggestions due to rate limiting
 
     async def check_domain_availability(self, domains: List[str], tld_preference: str = ".com") -> List[DomainResult]:
-        """Check domain availability using Porkbun API"""
+        """Check domain availability using Porkbun API with rate limiting"""
         results = []
         
-        for domain_name in domains:
+        # Porkbun allows only 1 domain check per 10 seconds, so let's limit to 3 domains max
+        # and add delays between requests
+        limited_domains = domains[:3]  # Limit to 3 domains to avoid rate limiting
+        
+        for i, domain_name in enumerate(limited_domains):
             # Add TLD if not present
             if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io', '.so', '.co']):
-                domain_name = f"{domain_name}{tld_preference}"
+                # Convert enum to string and ensure it starts with a dot
+                if hasattr(tld_preference, 'value'):
+                    tld = tld_preference.value
+                else:
+                    tld = str(tld_preference)
+                if not tld.startswith('.'):
+                    tld = f".{tld}"
+                domain_name = f"{domain_name}{tld}"
             
             try:
                 # Check cache first
@@ -282,6 +293,10 @@ class DomainSuggestionAgent:
                             print(f"Redis write error: {e}")
                     
                     results.append(result)
+                    
+                    # Add delay between requests to respect rate limits (except for last request)
+                    if i < len(limited_domains) - 1:
+                        await asyncio.sleep(10)  # Wait 10 seconds between requests
                 
             except Exception as e:
                 logging.error(f"Error checking domain {domain_name}: {e}")
