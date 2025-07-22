@@ -107,11 +107,17 @@ class DomainPreference(str, Enum):
     INSTITUTE = ".institute"
     ANY = "any"
 
+class ProviderPreference(str, Enum):
+    PORKBUN = "porkbun"
+    NAMECOM = "name.com"
+    ANY = "any"
+
 class DomainRequest(BaseModel):
     idea: str = Field(..., description="Business idea or concept")
     field: str = Field(..., description="Industry or field")
     style: DomainStyle = Field(default=DomainStyle.BRANDABLE)
     domain_preference: DomainPreference = Field(default=DomainPreference.COM)
+    provider_preference: ProviderPreference = Field(default=ProviderPreference.ANY, description="Which domain provider(s) to use")
     max_price: float = Field(default=50.0, description="Maximum price per year")
     num_choices: int = Field(default=5, ge=1, le=20)
 
@@ -196,7 +202,7 @@ class PorkbunProvider(BaseDomainProvider):
         
         # Porkbun: 1 domain per 10 seconds - very limited
         limited_domains = domains[:2]  # Limit to 2 domains for Porkbun
-        
+
         # Since domains now come with TLDs already attached (like "appx.com"), use them directly
         full_domain_list = limited_domains
         
@@ -296,7 +302,7 @@ class PorkbunProvider(BaseDomainProvider):
                 continue
         
         return results
-    
+
 # Name.com Provider  
 class NameComProvider(BaseDomainProvider):
     def __init__(self):
@@ -414,7 +420,7 @@ class DomainSuggestionAgent:
     def __init__(self):
         self.client = httpx.AsyncClient()
         self.porkbun = PorkbunProvider()
-        # Removed Name.com provider
+        self.namecom = NameComProvider() 
         
         # All available TLDs for ranking
         self.all_tlds = [
@@ -561,7 +567,7 @@ class DomainSuggestionAgent:
         return min(score, 10.0)  # Cap at 10.0
 
     async def search_domains_parallel(self, domains: List[str], request: DomainRequest) -> DomainResponse:
-        """Search domains using only Porkbun"""
+        """Search domains using selected providers"""
         
         # Generate all domain combinations and rank them
         base_names = await self.generate_domain_ideas(request)
@@ -569,21 +575,45 @@ class DomainSuggestionAgent:
         
         print(f"Generated {len(all_combinations)} total combinations, checking top {len(top_domains)}")
         
-        # Run only Porkbun provider
+        # Build provider tasks based on user selection
         tasks = []
-        if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
+        providers_to_use = []
+        
+        # Porkbun
+        if (request.provider_preference in [ProviderPreference.PORKBUN, ProviderPreference.ANY] and 
+            PORKBUN_API_KEY and PORKBUN_SECRET_KEY):
             tasks.append(self.porkbun.check_domains(top_domains, request.domain_preference, request.max_price))
+            providers_to_use.append("porkbun")
+        
+        # Name.com
+        if (request.provider_preference in [ProviderPreference.NAMECOM, ProviderPreference.ANY] and 
+            NAMECOM_API_TOKEN and NAMECOM_USERNAME):
+            tasks.append(self.namecom.check_domains(top_domains, request.domain_preference, request.max_price))
+            providers_to_use.append("name.com")
         
         if not tasks:
-            raise HTTPException(status_code=500, detail="No domain providers configured")
+            available_providers = []
+            if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
+                available_providers.append("porkbun")
+            if NAMECOM_API_TOKEN and NAMECOM_USERNAME:
+                available_providers.append("name.com")
+            
+            error_msg = f"No providers available for selection '{request.provider_preference.value}'. "
+            if available_providers:
+                error_msg += f"Available providers: {', '.join(available_providers)}"
+            else:
+                error_msg += "No providers are configured with valid API credentials."
+            
+            raise HTTPException(status_code=500, detail=error_msg)
         
-        # Execute searches
+        # Execute searches in parallel
         provider_results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Combine results
+        # Combine results from all providers
         all_results = []
         search_summary = {
-            "providers_used": ["porkbun"],
+            "providers_used": providers_to_use,
+            "provider_selection": request.provider_preference.value,
             "total_domain_combinations_generated": len(all_combinations),
             "top_domains_checked": top_domains,
             "domains_actually_checked": 0,
@@ -593,14 +623,25 @@ class DomainSuggestionAgent:
         
         for i, results in enumerate(provider_results):
             if isinstance(results, Exception):
-                search_summary["errors"].append(f"porkbun: {str(results)}")
+                provider_name = providers_to_use[i] if i < len(providers_to_use) else "unknown"
+                search_summary["errors"].append(f"{provider_name}: {str(results)}")
                 continue
             
             if results:
-                search_summary["domains_actually_checked"] = len(results)
+                search_summary["domains_actually_checked"] += len(results)
                 available_results = [r for r in results if r.available]
-                search_summary["available_domains_found"] = len(available_results)
+                search_summary["available_domains_found"] += len(available_results)
                 all_results.extend(available_results)
+        
+        # Remove duplicates (same domain from different providers) if using any/multiple providers
+        if request.provider_preference == ProviderPreference.ANY:
+            seen_domains = set()
+            unique_results = []
+            for result in all_results:
+                if result.domain not in seen_domains:
+                    seen_domains.add(result.domain)
+                    unique_results.append(result)
+            all_results = unique_results
         
         # Sort by score (best domains first)
         all_results.sort(key=lambda x: x.score, reverse=True)
@@ -644,8 +685,26 @@ async def test_porkbun_connection():
 
 @app.get("/api/test-namecom")
 async def test_namecom_connection():
-    """Name.com testing disabled"""
-    return {"status": "disabled", "message": "Name.com provider has been disabled"}
+    """Test Name.com API connection"""
+    try:
+        auth_string = f"{NAMECOM_USERNAME}:{NAMECOM_API_TOKEN}"
+        auth_bytes = auth_string.encode('ascii')
+        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.name.com/v4/hello",
+                headers={"Authorization": f"Basic {auth_b64}"},
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                return {"status": "success", "provider": "name.com", "response": response.json()}
+            else:
+                return {"status": "error", "provider": "name.com", "message": response.text}
+                
+    except Exception as e:
+        return {"status": "error", "provider": "name.com", "message": str(e)}
 
 # Test Porkbun only
 @app.get("/api/test-providers")
@@ -704,7 +763,7 @@ async def health_check():
         "version": "2.0.0",
         "providers": {
             "porkbun": bool(PORKBUN_API_KEY and PORKBUN_SECRET_KEY),
-            "namecom": False  # Disabled
+            "namecom": bool(NAMECOM_API_TOKEN and NAMECOM_USERNAME)
         }
     }
 
@@ -717,13 +776,19 @@ async def get_pricing():
         "providers": {
             "porkbun": {
                 "rate_limit": "1 domain per 10 seconds",
-                "pricing": "Variable by TLD"
+                "pricing": "Variable by TLD",
+                "bulk_check": "1 domain at a time"
             },
             "namecom": {
                 "rate_limit": "20 requests/sec, 3000/hour",
                 "bulk_check": "Up to 50 domains per call",
                 "pricing": "Variable by TLD"
             }
+        },
+        "provider_selection": {
+            "porkbun": "Use only Porkbun (slower but sometimes different pricing)",
+            "name.com": "Use only Name.com (faster bulk checking)",
+            "any": "Use all available providers (best coverage, removes duplicates)"
         }
     }
 
