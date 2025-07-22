@@ -71,8 +71,6 @@ class DomainPreference(str, Enum):
     NET = ".net"
     ORG = ".org"
     IO = ".io"
-    SO = ".so"
-    CO = ".co"
     ANY = "any"
 
 class DomainRequest(BaseModel):
@@ -166,14 +164,14 @@ class DomainSuggestionAgent:
         
         return suggestions[:request.num_choices * 3]  # Generate more than needed for filtering
 
-    async def check_domain_availability(self, domains: List[str]) -> List[DomainResult]:
+    async def check_domain_availability(self, domains: List[str], tld_preference: str = ".com") -> List[DomainResult]:
         """Check domain availability using Porkbun API"""
         results = []
         
         for domain_name in domains:
             # Add TLD if not present
-            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io']):
-                domain_name = f"{domain_name}.com"
+            if not any(domain_name.endswith(tld) for tld in ['.com', '.net', '.org', '.io', '.so', '.co']):
+                domain_name = f"{domain_name}{tld_preference}"
             
             try:
                 # Check cache first
@@ -197,11 +195,26 @@ class DomainSuggestionAgent:
                             "secretapikey": PORKBUN_SECRET_KEY,
                             "apikey": PORKBUN_API_KEY
                         },
+                        headers={
+                            "Content-Type": "application/json"
+                        },
                         timeout=30.0
                     )
                     
-                    if availability_response.status_code == 200:
+                    # Debug the response
+                    if availability_response.status_code != 200:
+                        print(f"API Error for {domain_name}: Status {availability_response.status_code}")
+                        print(f"Response: {availability_response.text}")
+                        # Mark as unavailable if API error
+                        is_available = False
+                        availability_data = {}
+                        price_first_year = None
+                        price_annual = None
+                        pricing_details = None
+                        deal_info = None
+                    else:
                         availability_data = availability_response.json()
+                        print(f"API Success for {domain_name}: {availability_data}")
                         
                         # Parse the response correctly according to Porkbun docs
                         is_available = (
@@ -244,11 +257,6 @@ class DomainSuggestionAgent:
                                 deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
                             elif response_data.get("firstYearPromo") == "yes":
                                 deal_info = f"Promotional pricing: ${price_first_year:.2f} first year"
-                    
-                    else:
-                        # If API call failed, mark as unavailable
-                        is_available = False
-                        print(f"API call failed for {domain_name}: {availability_response.status_code}")
                     
                     result = DomainResult(
                         domain=domain_name,
@@ -348,6 +356,9 @@ async def test_porkbun_connection():
                     "secretapikey": PORKBUN_SECRET_KEY,
                     "apikey": PORKBUN_API_KEY
                 },
+                headers={
+                    "Content-Type": "application/json"
+                },
                 timeout=10.0
             )
             
@@ -381,7 +392,7 @@ async def suggest_domains(request: DomainRequest):
         domain_ideas = await domain_agent.generate_domain_ideas(request)
         
         # Check availability
-        domain_results = await domain_agent.check_domain_availability(domain_ideas)
+        domain_results = await domain_agent.check_domain_availability(domain_ideas, request.domain_preference)
         
         # Filter available domains and sort by score
         available_domains = [d for d in domain_results if d.available]
