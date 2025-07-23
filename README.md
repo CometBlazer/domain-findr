@@ -30,3 +30,4 @@ docker run -p 8000:8000 domain-findr
 ## API Endpoint
 
 - `POST /api/domains/suggest` - Get domain suggestions
+- `GET /api/health` - API Status Check
