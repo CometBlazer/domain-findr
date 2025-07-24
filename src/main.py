@@ -141,8 +141,8 @@ app = FastAPI(
 # CORS middleware for NextJS frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update with your NextJS domain in production
-    allow_credentials=True,
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:3000", "http://127.0.0.1:8000", "https://snapsi.me", "https://www.snapsi.me", "https://domainsapi.vercel.app", "https://www.domainsapi.vercel.app"], 
+    allow_credentials=False, 
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -158,10 +158,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 print(f"Rate Limit: {RATE_LIMIT_REQUESTS_PER_MINUTE} requests/minute")
 print(f"Available TLDs: {len(AVAILABLE_TLDS)} extensions loaded")
-print(f"Loaded Porkbun API Key: {'✅ Yes' if PORKBUN_API_KEY else '❌ No'}")
-print(f"Loaded Porkbun Secret: {'✅ Yes' if PORKBUN_SECRET_KEY else '❌ No'}")
-print(f"Loaded Name.com Token: {'✅ Yes' if NAMECOM_API_TOKEN else '❌ No'}")
-print(f"Loaded Name.com Username: {'✅ Yes' if NAMECOM_USERNAME else '❌ No'}")
+# Safe logging without exposing credentials
+providers_loaded = []
+if PORKBUN_API_KEY and PORKBUN_SECRET_KEY:
+    providers_loaded.append("porkbun")
+if NAMECOM_API_TOKEN and NAMECOM_USERNAME:
+    providers_loaded.append("name.com")
+print(f"✅ Loaded providers: {', '.join(providers_loaded) if providers_loaded else 'none'}")
 
 # Redis client with better error handling
 def get_redis_client():
@@ -171,7 +174,8 @@ def get_redis_client():
         if redis_url.startswith('rediss://'):
             client = redis.from_url(
                 redis_url,
-                ssl_cert_reqs=None,
+                ssl_cert_reqs='required',  # ✅ REQUIRE VALID SSL CERTIFICATES
+                ssl_check_hostname=True,   # ✅ VERIFY HOSTNAME AGAINST CERTIFICATE
                 decode_responses=True,
                 socket_timeout=5,
                 socket_connect_timeout=5,
