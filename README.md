@@ -1,6 +1,6 @@
-# domainFindr
+# Snapsi
 
-AI-powered domain name suggestion API built with FastAPI and Porkbun integration.
+Domain name suggestion API built with FastAPI and Porkbun integration.
 
 ## Setup
 
@@ -27,7 +27,41 @@ docker build -t domain-findr .
 docker run -p 8000:8000 domain-findr
 ```
 
-## API Endpoint
+## API Endpoints
 
-- `POST /api/domains/suggest` - Get domain suggestions
-- `GET /api/health` - API Status Check
+### Main Endpoints
+
+- `POST /api/domains/suggest` - Get domain suggestions with intelligent ranking
+- `POST /api/parse-input` - Debug input parsing and auto-detection
+
+### Information Endpoints (Not Rate Limited)
+
+- `GET /api/health` - API status and configuration
+- `GET /api/pricing` - Pricing and provider information
+- `GET /api/examples` - Example API requests for all use cases
+- `GET /api/tlds` - List of all supported Top Level Domains
+- `GET /api/ranking` - Detailed domain ranking algorithm information
+- `GET /api/rate-limit` - Current rate limit status for your IP
+- `GET /api/docs/quick-start` - Step-by-step quick start guide
+
+### Testing Endpoints (Rate Limited)
+
+- `GET /api/test-providers` - Test all configured domain providers
+- `GET /api/test-porkbun` - Test Porkbun API connection
+- `GET /api/test-namecom` - Test Name.com API connection
+
+## Rate Limiting
+
+- **Limit**: 100 requests per minute per IP address
+- **Rate limited endpoints**: All POST endpoints and test endpoints
+- **Free endpoints**: Health, pricing, examples, TLDs, ranking info
+
+## Features
+
+- 🧠 **AI-Powered Suggestions** - Generate brandable domain names
+- 📊 **Intelligent Ranking** - GoDaddy-style scoring (0-10 scale)
+- ⚡ **Real-time Availability** - Live domain checking
+- 🏢 **Multi-Provider** - Porkbun and Name.com integration
+- 🎯 **Input Auto-Detection** - Automatically detects idea/base_name/exact_name
+- 💰 **Price Filtering** - Set maximum price limits
+- 🚀 **Fast Performance** - Bulk checking with caching

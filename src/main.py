@@ -666,14 +666,17 @@ class PorkbunProvider(BaseDomainProvider):
         super().__init__("porkbun")
     
     async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0, 
-                          input_source: str = "ai_generated", original_keywords: List[str] = None) -> List[DomainResult]:
+                      input_source: str = "ai_generated", original_keywords: List[str] = None) -> List[DomainResult]:
         """Check domain availability using Porkbun API with rate limiting"""
         results = []
+        available_count = 0
+        max_available_needed = 50 if input_source == "user_provided" else 20
         
-        # Porkbun: 1 domain per 10 seconds - very limited
-        limited_domains = domains[:5] if input_source != "user_provided" else domains[:10]
-
-        for i, domain_name in enumerate(limited_domains):
+        for i, domain_name in enumerate(domains):
+            # Stop if we have enough available domains
+            if available_count >= max_available_needed:
+                break
+                
             try:
                 # Check cache first
                 cache_key = f"porkbun:domain:{domain_name}"
@@ -687,7 +690,10 @@ class PorkbunProvider(BaseDomainProvider):
                     )
                     cached_data['score'] = score
                     cached_data['ranking_factors'] = ranking_factors
-                    results.append(DomainResult(**cached_data))
+                    result = DomainResult(**cached_data)
+                    results.append(result)
+                    if result.available:
+                        available_count += 1
                     continue
                 
                 async with httpx.AsyncClient() as client:
@@ -765,9 +771,11 @@ class PorkbunProvider(BaseDomainProvider):
                     safe_cache_set(redis_client, cache_key, result.dict(), expiry)
                     
                     results.append(result)
+                    if is_available:
+                        available_count += 1
                     
                     # Rate limiting: wait between requests (shorter for user-provided domains)
-                    if i < len(limited_domains) - 1:
+                    if i < len(domains) - 1:
                         wait_time = 5 if input_source == "user_provided" else 10
                         await asyncio.sleep(wait_time)
                 
@@ -783,98 +791,115 @@ class NameComProvider(BaseDomainProvider):
         super().__init__("name.com")
     
     async def check_domains(self, domains: List[str], tld_preference: str, max_price: float = 50.0, 
-                          input_source: str = "ai_generated", original_keywords: List[str] = None) -> List[DomainResult]:
+                        input_source: str = "ai_generated", original_keywords: List[str] = None) -> List[DomainResult]:
         """Check domain availability using Name.com API"""
         results = []
+        available_count = 0
+        max_available_needed = 50 if input_source == "user_provided" else 20
         
-        # Name.com allows up to 50 domains per call
-        limited_domains = domains[:20] if input_source != "user_provided" else domains[:50]
+        # Process domains in batches of 20 (Name.com limit is 50, but we'll be conservative)
+        batch_size = 20
+        total_processed = 0
         
-        try:
-            # Create Basic Auth header
-            auth_string = f"{NAMECOM_USERNAME}:{NAMECOM_API_TOKEN}"
-            auth_bytes = auth_string.encode('ascii')
-            auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+        for batch_start in range(0, len(domains), batch_size):
+            # Stop if we have enough available domains
+            if available_count >= max_available_needed:
+                break
+                
+            batch_domains = domains[batch_start:batch_start + batch_size]
             
-            async with httpx.AsyncClient() as client:
-                # Name.com bulk availability check
-                availability_response = await client.post(
-                    "https://api.name.com/v4/domains:checkAvailability",
-                    json={"domainNames": limited_domains},
-                    headers={
-                        "Authorization": f"Basic {auth_b64}",
-                        "Content-Type": "application/json"
-                    },
-                    timeout=30.0
-                )
+            try:
+                # Create Basic Auth header
+                auth_string = f"{NAMECOM_USERNAME}:{NAMECOM_API_TOKEN}"
+                auth_bytes = auth_string.encode('ascii')
+                auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
                 
-                if availability_response.status_code != 200:
-                    print(f"Name.com API Error: {availability_response.status_code}")
-                    print(f"Response: {availability_response.text}")
-                    return results
-                
-                availability_data = availability_response.json()
-                
-                # Process results
-                for domain_info in availability_data.get("results", []):
-                    domain_name = domain_info.get("domainName", "")
-                    is_available = domain_info.get("purchasable", False)
-                    purchase_type = domain_info.get("purchaseType", "")
-                    
-                    price_first_year = None
-                    price_annual = None
-                    pricing_details = None
-                    deal_info = None
-                    
-                    if is_available:
-                        price_first_year = float(domain_info.get("purchasePrice", 0))
-                        price_annual = float(domain_info.get("renewalPrice", 0))
-                        
-                        # Filter by max_price
-                        if price_first_year > max_price or price_annual > max_price:
-                            continue
-                        
-                        pricing_details = {
-                            "registration": price_first_year,
-                            "renewal": price_annual,
-                            "premium": domain_info.get("premium", False),
-                            "purchase_type": purchase_type
-                        }
-                        
-                        if price_first_year != price_annual and price_annual > 0:
-                            deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
-                        
-                        if domain_info.get("premium", False) or purchase_type in ["aftermarket_s", "aftermarket"]:
-                            premium_info = f"Premium domain ({purchase_type})"
-                            deal_info = f"{deal_info} - {premium_info}" if deal_info else premium_info
-                    
-                    # Calculate improved score
-                    score, ranking_factors = DomainRanker.calculate_domain_score(
-                        domain_name, is_available, price_first_year, input_source, original_keywords
+                async with httpx.AsyncClient() as client:
+                    # Name.com bulk availability check
+                    availability_response = await client.post(
+                        "https://api.name.com/v4/domains:checkAvailability",
+                        json={"domainNames": batch_domains},
+                        headers={
+                            "Authorization": f"Basic {auth_b64}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=30.0
                     )
                     
-                    result = DomainResult(
-                        domain=domain_name,
-                        available=is_available,
-                        price_first_year=price_first_year,
-                        price_annual=price_annual,
-                        registrar="name.com",
-                        deal_info=deal_info,
-                        pricing_details=pricing_details,
-                        score=score,
-                        input_source=input_source,
-                        ranking_factors=ranking_factors
-                    )
+                    if availability_response.status_code != 200:
+                        print(f"Name.com API Error: {availability_response.status_code}")
+                        print(f"Response: {availability_response.text}")
+                        continue
                     
-                    # Cache result
-                    cache_key = f"namecom:domain:{domain_name}"
-                    expiry = 7200 if is_available else 86400
-                    safe_cache_set(redis_client, cache_key, result.dict(), expiry)
+                    availability_data = availability_response.json()
                     
-                    results.append(result)
-                
-        except Exception as e:
-            logging.error(f"Name.com error checking domains: {e}")
+                    # Process results
+                    for domain_info in availability_data.get("results", []):
+                        domain_name = domain_info.get("domainName", "")
+                        is_available = domain_info.get("purchasable", False)
+                        purchase_type = domain_info.get("purchaseType", "")
+                        
+                        price_first_year = None
+                        price_annual = None
+                        pricing_details = None
+                        deal_info = None
+                        
+                        if is_available:
+                            price_first_year = float(domain_info.get("purchasePrice", 0))
+                            price_annual = float(domain_info.get("renewalPrice", 0))
+                            
+                            # Filter by max_price
+                            if price_first_year > max_price or price_annual > max_price:
+                                continue
+                            
+                            pricing_details = {
+                                "registration": price_first_year,
+                                "renewal": price_annual,
+                                "premium": domain_info.get("premium", False),
+                                "purchase_type": purchase_type
+                            }
+                            
+                            if price_first_year != price_annual and price_annual > 0:
+                                deal_info = f"First year: ${price_first_year:.2f}, Then: ${price_annual:.2f}/year"
+                            
+                            if domain_info.get("premium", False) or purchase_type in ["aftermarket_s", "aftermarket"]:
+                                premium_info = f"Premium domain ({purchase_type})"
+                                deal_info = f"{deal_info} - {premium_info}" if deal_info else premium_info
+                            
+                            available_count += 1
+                        
+                        # Calculate improved score
+                        score, ranking_factors = DomainRanker.calculate_domain_score(
+                            domain_name, is_available, price_first_year, input_source, original_keywords
+                        )
+                        
+                        result = DomainResult(
+                            domain=domain_name,
+                            available=is_available,
+                            price_first_year=price_first_year,
+                            price_annual=price_annual,
+                            registrar="name.com",
+                            deal_info=deal_info,
+                            pricing_details=pricing_details,
+                            score=score,
+                            input_source=input_source,
+                            ranking_factors=ranking_factors
+                        )
+                        
+                        # Cache result
+                        cache_key = f"namecom:domain:{domain_name}"
+                        expiry = 7200 if is_available else 86400
+                        safe_cache_set(redis_client, cache_key, result.dict(), expiry)
+                        
+                        results.append(result)
+                        
+                        # Stop processing this batch if we have enough available domains
+                        if available_count >= max_available_needed:
+                            break
+                    
+            except Exception as e:
+                logging.error(f"Name.com error checking domains batch: {e}")
+                continue
         
         return results
 
@@ -992,8 +1017,8 @@ class DomainSuggestionAgent:
         # Sort by score (highest first)
         all_combinations.sort(key=lambda x: x[1], reverse=True)
         
-        # Return top domains for checking
-        top_domains = [combo[0] for combo in all_combinations[:20]]
+        # Return more domains for checking to ensure we find enough available ones
+        top_domains = [combo[0] for combo in all_combinations[:60]]
         
         return top_domains, all_combinations
 
@@ -1095,15 +1120,16 @@ class DomainSuggestionAgent:
                     if r.available and r.domain not in unique_results:
                         unique_results[r.domain] = r
         
-        # Sort by improved score (highest first)
-        sorted_domains = sorted(
-            unique_results.values(), 
+        # Sort by improved score (highest first) and filter only available domains
+        available_domains = [d for d in unique_results.values() if d.available]
+        sorted_available_domains = sorted(
+            available_domains, 
             key=lambda d: d.score, 
             reverse=True
         )
 
-        # Limit results to requested number
-        final_domains = sorted_domains[:request.num_choices]
+        # Take only the requested number of available domains
+        final_domains = sorted_available_domains[:request.num_choices]
         search_summary["available_domains_found"] = len(final_domains)
 
         return DomainResponse(
