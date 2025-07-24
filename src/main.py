@@ -20,8 +20,8 @@ load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Domain Finder API",
-    description="AI-powered domain name suggestion API with multi-provider support",
+    title="Domains API",
+    description="Domain name suggestion API with multi-provider support",
     version="2.1.0"
 )
 
@@ -156,6 +156,12 @@ class DomainPreference(str, Enum):
     LAB = ".lab"
     ACADEMY = ".academy"
     INSTITUTE = ".institute"
+    SH = ".sh"
+    GUIDE = ".guide"
+    INC = ".inc"
+    FIT = ".fit"
+    LIFE = ".life"
+    PRO = ".pro"
     ANY = "any"
 
 class ProviderPreference(str, Enum):
@@ -213,7 +219,7 @@ class DomainResult(BaseModel):
     price_annual: Optional[float] = None
     registrar: str
     deal_info: Optional[str] = None
-    score: float = Field(description="AI ranking score")
+    score: float = Field(description="AI ranking score") # Doesn't actually use AI yet, but will in the future
     pricing_details: Optional[Dict[str, Any]] = None
     input_source: str = Field(description="How this domain was generated (ai_generated, user_provided, base_expansion)")
 
@@ -231,7 +237,7 @@ class InputParser:
         input_text = input_text.strip().lower()
         
         # Check if it contains a TLD (exact domain)
-        tld_pattern = r'\.(com|net|org|io|co|ly|app|dev|ai|tech|online|site|website|store|shop|biz|info|me|cc|tv|so|xyz|cloud|digital|agency|studio|design|media|services|solutions|consulting|lab|academy|institute)$'
+        tld_pattern = r'\.(com|net|org|io|co|ly|app|dev|ai|tech|online|site|website|store|shop|biz|info|me|cc|tv|so|xyz|cloud|digital|agency|studio|design|media|services|solutions|consulting|lab|academy|institute|sh"|guide|inc|fit|life|pro)$'
         if re.search(tld_pattern, input_text):
             return InputType.EXACT_NAME
         
@@ -268,7 +274,7 @@ class InputParser:
             base_name = input_text
             if request.domain_preference == DomainPreference.ANY:
                 # Generate with multiple popular TLDs
-                popular_tlds = [".com", ".net", ".org", ".io", ".co", ".app", ".dev"]
+                popular_tlds = [".com", ".org", ".io", ".co", ".app", ".dev", ".ai", ".tech", ".me"]
                 domains_to_check = [f"{base_name}{tld}" for tld in popular_tlds]
             else:
                 # Use specified TLD
@@ -319,7 +325,7 @@ class BaseDomainProvider:
             score += 2.0
         elif domain.endswith('.io'):
             score += 1.5
-        elif domain.endswith('.net'):
+        elif domain.endswith('.ai'):
             score += 1.0
         
         # Price score (lower price is better)
@@ -554,11 +560,12 @@ class DomainSuggestionAgent:
             ".ai", ".tech", ".online", ".site", ".website", ".store", 
             ".shop", ".biz", ".info", ".me", ".cc", ".tv", ".so", ".xyz",
             ".cloud", ".digital", ".agency", ".studio", ".design", ".media",
-            ".services", ".solutions", ".consulting", ".lab", ".academy", ".institute"
+            ".services", ".solutions", ".consulting", ".lab", ".academy", 
+            ".institute", ".sh", ".guide", ".inc", ".fit", ".life", ".pro"
         ]
     
     async def generate_domain_ideas(self, request: DomainRequest) -> List[str]:
-        """Generate domain name ideas using AI logic"""
+        """Generate domain name ideas using AI logic. Will generate using AI later"""
         base_words = request.input_text.lower().split()
         field_words = request.field.lower().split() if request.field else []
         
